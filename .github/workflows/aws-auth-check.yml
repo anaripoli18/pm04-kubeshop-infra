@@ -1,0 +1,23 @@
+name: Teste de autenticacao AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verificar-aws:
+    name: Verificar conexao GitHub e AWS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Autenticar na AWS com OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.1
+        with:
+          role-to-assume: arn:aws:iam::251783195076:role/PM04GitHubActionsDeploy
+          aws-region: us-east-1
+
+      - name: Confirmar identidade AWS
+        run: aws sts get-caller-identity --query Arn --output text
