@@ -1,0 +1,73 @@
+name: Planejamento Terraform AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_instance_type:
+        description: Tipo da VM da aplicacao
+        required: true
+        type: choice
+        default: t3.small
+        options:
+          - t3.small
+          - t3.medium
+
+      db_instance_type:
+        description: Tipo da VM do MongoDB
+        required: true
+        type: choice
+        default: t3.small
+        options:
+          - t3.small
+          - t3.medium
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-pm04-dev
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Planejar infraestrutura AWS
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_app_instance_type: ${{ inputs.app_instance_type }}
+      TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+
+    steps:
+      - name: Baixar codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.2"
+
+      - name: Autenticar na AWS
+        uses: aws-actions/configure-aws-credentials@v6.3.1
+        with:
+          role-to-assume: arn:aws:iam::251783195076:role/PM04GitHubActionsDeploy
+          aws-region: us-east-1
+
+      - name: Confirmar conta AWS
+        run: aws sts get-caller-identity
+
+      - name: Inicializar Terraform e estado S3
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=pm04-kubeshop-tfstate-251783195076"
+
+      - name: Validar Terraform
+        run: terraform validate -no-color
+
+      - name: Planejar infraestrutura
+        run: terraform plan -input=false -no-color
