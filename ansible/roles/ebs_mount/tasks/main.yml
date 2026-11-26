@@ -1,0 +1,97 @@
+---
+- name: Validar ID do volume EBS
+  ansible.builtin.assert:
+    that:
+      - (kubeshop_ebs_volume_id | default('')) is match('^vol-[0-9a-f]{8,17}$')
+    fail_msg: "Informe o ID do EBS criado pelo Terraform."
+
+- name: Identificar dispositivo pelo serial do EBS
+  ansible.builtin.shell: |
+    set -euo pipefail
+    lsblk -dn -o PATH,SERIAL |
+      awk -v serial="{{ kubeshop_ebs_volume_id | replace('-', '') }}" \
+      '$2 == serial {print $1}'
+  args:
+    executable: /bin/bash
+  register: ebs_dispositivo
+  changed_when: false
+
+- name: Confirmar que foi encontrado um unico disco
+  ansible.builtin.assert:
+    that:
+      - ebs_dispositivo.stdout_lines | length == 1
+    fail_msg: "Nao foi possivel identificar o EBS com seguranca."
+
+- name: Guardar caminho do dispositivo
+  ansible.builtin.set_fact:
+    kubeshop_ebs_device: "{{ ebs_dispositivo.stdout_lines[0] }}"
+
+- name: Verificar particoes existentes
+  ansible.builtin.command:
+    cmd: "lsblk -n -o TYPE {{ kubeshop_ebs_device }}"
+  register: ebs_layout
+  changed_when: false
+
+- name: Nao modificar discos com particoes
+  ansible.builtin.assert:
+    that:
+      - "'part' not in ebs_layout.stdout_lines"
+    fail_msg: "O EBS tem particoes e exige verificacao manual."
+
+- name: Verificar montagem existente
+  ansible.builtin.command:
+    cmd: "lsblk -nr -o MOUNTPOINT {{ kubeshop_ebs_device }}"
+  register: ebs_mounts
+  changed_when: false
+
+- name: Impedir uso de volume montado em outro lugar
+  ansible.builtin.assert:
+    that:
+      - >
+        ebs_mounts.stdout_lines
+        | reject('equalto', '')
+        | reject('equalto', '/srv/kubeshop-data')
+        | list
+        | length == 0
+    fail_msg: "O volume ja esta montado em outro local."
+
+- name: Verificar formato atual do volume
+  ansible.builtin.command:
+    cmd: "blkid -s TYPE -o value {{ kubeshop_ebs_device }}"
+  register: ebs_tipo
+  changed_when: false
+  failed_when: false
+
+- name: Impedir alteracao de formato desconhecido
+  ansible.builtin.assert:
+    that:
+      - ebs_tipo.stdout in ['', 'ext4']
+    fail_msg: "O EBS possui outro formato. Nao sera formatado."
+
+- name: Preparar sistema de arquivos ext4
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ kubeshop_ebs_device }}"
+    force: false
+
+- name: Consultar UUID do volume
+  ansible.builtin.command:
+    cmd: "blkid -s UUID -o value {{ kubeshop_ebs_device }}"
+  register: ebs_uuid
+  changed_when: false
+
+- name: Criar ponto de montagem
+  ansible.builtin.file:
+    path: /srv/kubeshop-data
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Montar EBS e registrar no fstab
+  ansible.posix.mount:
+    path: /srv/kubeshop-data
+    src: "UUID={{ ebs_uuid.stdout }}"
+    fstype: ext4
+    opts: defaults,nofail
+    state: mounted
