@@ -7,3 +7,19 @@
   roles:
     - os_updates
     - docker
+
+- name: Configurar MongoDB
+  hosts: database
+  become: true
+  gather_facts: true
+
+  roles:
+    - mongodb
+
+- name: Configurar aplicacao
+  hosts: application
+  become: true
+  gather_facts: true
+
+  roles:
+    - application

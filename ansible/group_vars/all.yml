@@ -7,3 +7,14 @@ update_os: false
 
 # Pacotes adicionais solicitados na pipeline
 extra_packages: []
+
+# Repositorio utilizado pelas VMs
+kubeshop_repo_url: "https://github.com/anaripoli18/pm04-kubeshop-infra.git"
+kubeshop_git_ref: "main"
+
+# Versao da aplicacao
+kubeshop_app_version: "1.0.0"
+
+# Credenciais recebidas do ambiente de execucao
+kubeshop_mongo_app_password: "{{ lookup('ansible.builtin.env', 'KUBESHOP_MONGO_APP_PASSWORD') }}"
+kubeshop_mongo_root_password: "{{ lookup('ansible.builtin.env', 'KUBESHOP_MONGO_ROOT_PASSWORD') }}"
