@@ -8,6 +8,14 @@
     - os_updates
     - docker
 
+- name: Preparar disco persistente do MongoDB
+  hosts: database
+  become: true
+  gather_facts: true
+
+  roles:
+    - ebs_mount
+
 - name: Configurar MongoDB
   hosts: database
   become: true
