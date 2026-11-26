@@ -1,0 +1,85 @@
+---
+- name: Verificar se o EBS esta montado
+  ansible.builtin.command:
+    cmd: findmnt -n -o SOURCE --mountpoint /srv/kubeshop-data
+  register: mongo_mount
+  changed_when: false
+  failed_when: false
+
+- name: Impedir uso do disco errado
+  ansible.builtin.assert:
+    that:
+      - mongo_mount.rc == 0
+      - mongo_mount.stdout | length > 0
+    fail_msg: "Disco EBS nao montado. MongoDB nao sera iniciado."
+
+- name: Verificar parametros obrigatorios
+  ansible.builtin.assert:
+    that:
+      - kubeshop_db_private_ip is defined
+      - kubeshop_db_private_ip | length > 0
+      - kubeshop_mongo_app_password | length >= 16
+      - kubeshop_mongo_root_password | length >= 16
+  no_log: true
+
+- name: Baixar codigo do KubeShop
+  ansible.builtin.git:
+    repo: "{{ kubeshop_repo_url }}"
+    dest: /opt/kubeshop
+    version: "{{ kubeshop_git_ref }}"
+    update: true
+
+- name: Criar diretorios persistentes do MongoDB
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0750"
+  loop:
+    - /srv/kubeshop-data/db
+    - /srv/kubeshop-data/config
+
+- name: Criar pasta protegida de credenciais
+  ansible.builtin.file:
+    path: /opt/kubeshop/.secrets
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configurar credenciais do MongoDB
+  ansible.builtin.copy:
+    content: "{{ item.value }}\n"
+    dest: "/opt/kubeshop/.secrets/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - name: mongo-app-password
+      value: "{{ kubeshop_mongo_app_password }}"
+    - name: mongo-root-password
+      value: "{{ kubeshop_mongo_root_password }}"
+  no_log: true
+
+- name: Configurar variaveis do MongoDB
+  ansible.builtin.copy:
+    dest: /opt/kubeshop/.env
+    content: |
+      DB_BIND_ADDRESS={{ kubeshop_db_private_ip }}
+      MONGO_DATA_DIR=/srv/kubeshop-data/db
+      MONGO_CONFIG_DIR=/srv/kubeshop-data/config
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Iniciar MongoDB com Docker Compose
+  community.docker.docker_compose_v2:
+    project_src: /opt/kubeshop
+    files:
+      - compose.db.yaml
+    state: present
+    pull: missing
+    recreate: auto
+    wait: true
+    wait_timeout: 240

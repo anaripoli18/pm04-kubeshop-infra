@@ -1,0 +1,55 @@
+---
+- name: Verificar configuracoes da aplicacao
+  ansible.builtin.assert:
+    that:
+      - kubeshop_db_private_ip is defined
+      - kubeshop_db_private_ip | length > 0
+      - kubeshop_mongo_app_password | length >= 16
+  no_log: true
+
+- name: Baixar codigo do KubeShop
+  ansible.builtin.git:
+    repo: "{{ kubeshop_repo_url }}"
+    dest: /opt/kubeshop
+    version: "{{ kubeshop_git_ref }}"
+    update: true
+
+- name: Criar pasta de credenciais da aplicacao
+  ansible.builtin.file:
+    path: /opt/kubeshop/.secrets
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configurar senha de acesso ao MongoDB
+  ansible.builtin.copy:
+    content: "{{ kubeshop_mongo_app_password }}\n"
+    dest: /opt/kubeshop/.secrets/mongo-app-password
+    owner: root
+    group: root
+    mode: "0644"
+  no_log: true
+
+- name: Configurar variaveis da aplicacao
+  ansible.builtin.copy:
+    dest: /opt/kubeshop/.env
+    content: |
+      APP_VERSION={{ kubeshop_app_version }}
+      APP_BIND_ADDRESS=0.0.0.0
+      APP_HTTP_PORT=8080
+      MONGO_HOST={{ kubeshop_db_private_ip }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Iniciar frontend e API
+  community.docker.docker_compose_v2:
+    project_src: /opt/kubeshop
+    files:
+      - compose.app.yaml
+    state: present
+    build: policy
+    recreate: auto
+    wait: true
+    wait_timeout: 240
