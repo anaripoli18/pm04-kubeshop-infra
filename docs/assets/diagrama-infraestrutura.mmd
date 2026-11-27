@@ -1,0 +1,32 @@
+﻿flowchart TB
+    Internet((Internet))
+
+    subgraph AWS["AWS - us-east-1"]
+        IGW["Internet Gateway"]
+
+        subgraph VPC["VPC KubeShop - 10.40.0.0/16"]
+            subgraph PUBLIC["Sub-rede pública - 10.40.1.0/24"]
+                APP["EC2 Aplicação<br/>t3.small<br/>Ubuntu 24.04<br/>IP público<br/>Frontend + Nginx + API"]
+                NAT["NAT Gateway<br/>Elastic IP"]
+            end
+
+            subgraph PRIVATE["Sub-rede privada - 10.40.2.0/24"]
+                DB["EC2 Banco de Dados<br/>t3.small<br/>Ubuntu 24.04<br/>Sem IP público"]
+                MONGO["MongoDB 8.0.17<br/>TCP 27017"]
+                EBS[("EBS gp3<br/>20 GiB<br/>Criptografado")]
+                DB --- MONGO
+                MONGO --- EBS
+            end
+        end
+    end
+
+    Internet --> IGW
+    IGW --> APP
+    APP -->|"TCP 27017 - acesso permitido pelo Security Group"| MONGO
+    DB -->|"Saída para internet"| NAT
+    NAT --> IGW
+
+    classDef public fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef private fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    class APP,NAT public
+    class DB,MONGO,EBS private
