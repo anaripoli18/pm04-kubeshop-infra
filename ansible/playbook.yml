@@ -1,4 +1,13 @@
 ---
+- name: Aguardar inicializacao das VMs
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Aguardar conclusao do cloud-init
+      ansible.builtin.raw: cloud-init status --wait
+      changed_when: false
+
 - name: Preparar servidores KubeShop
   hosts: all
   become: true
