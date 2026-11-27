@@ -20,6 +20,12 @@ on:
         options:
           - t3.small
           - t3.medium
+      
+      release_label:
+        description: Identificacao da atualizacao da VM
+        type: string
+        required: true
+        default: "inicial"
 
       db_instance_type:
         description: Tipo da VM MongoDB
@@ -71,6 +77,8 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_VAR_app_instance_type: ${{ inputs.app_instance_type }}
       TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+      TF_VAR_release_label: ${{ inputs.release_label }}
+
 
     steps:
       - name: Baixar repositorio

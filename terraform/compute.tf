@@ -34,8 +34,9 @@ resource "aws_instance" "app" {
   }
 
   tags = {
-    Name = "pm04-kubeshop-app-${var.environment}"
-    Role = "application"
+    Name    = "pm04-kubeshop-app-${var.environment}"
+    Role    = "application"
+    Release = var.release_label
   }
 
   lifecycle {
