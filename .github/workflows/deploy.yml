@@ -1,0 +1,264 @@
+name: Implantacao KubeShop AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operacao desejada
+        type: choice
+        required: true
+        default: plan
+        options:
+          - plan
+          - deploy
+
+      app_instance_type:
+        description: Tipo da VM de aplicacao
+        type: choice
+        required: true
+        default: t3.small
+        options:
+          - t3.small
+          - t3.medium
+
+      db_instance_type:
+        description: Tipo da VM MongoDB
+        type: choice
+        required: true
+        default: t3.small
+        options:
+          - t3.small
+          - t3.medium
+
+      app_version:
+        description: Versao da aplicacao
+        type: string
+        required: true
+        default: "1.0.0"
+
+      update_os:
+        description: Atualizar pacotes do Ubuntu
+        type: boolean
+        default: false
+
+      extra_packages:
+        description: Pacotes extras separados por virgula
+        type: string
+        required: false
+        default: ""
+
+      confirm_deploy:
+        description: Para implantar digite IMPLANTAR-PM04
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-pm04-dev
+  cancel-in-progress: false
+
+jobs:
+  infraestrutura:
+    name: Terraform e Ansible
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_VAR_app_instance_type: ${{ inputs.app_instance_type }}
+      TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+
+    steps:
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Validar autorizacao de implantacao
+        if: ${{ inputs.operation == 'deploy' }}
+        env:
+          CONFIRMACAO: ${{ inputs.confirm_deploy }}
+        run: |
+          if [ "$CONFIRMACAO" != "IMPLANTAR-PM04" ]; then
+            echo "Implantacao nao autorizada."
+            exit 1
+          fi
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.17.2"
+          terraform_wrapper: false
+
+      - name: Autenticar na AWS com OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.1
+        with:
+          role-to-assume: arn:aws:iam::251783195076:role/PM04GitHubActionsDeploy
+          aws-region: us-east-1
+
+      - name: Inicializar estado remoto
+        run: |
+          terraform -chdir=terraform init -input=false \
+            -backend-config="bucket=pm04-kubeshop-tfstate-251783195076"
+
+      - name: Validar infraestrutura
+        run: terraform -chdir=terraform validate -no-color
+
+      - name: Gerar plano Terraform
+        run: |
+          terraform -chdir=terraform plan \
+            -input=false -no-color -out=pm04.tfplan
+
+      - name: Aplicar infraestrutura
+        if: ${{ inputs.operation == 'deploy' }}
+        run: |
+          terraform -chdir=terraform apply \
+            -input=false -no-color pm04.tfplan
+
+      - name: Instalar Ansible e colecoes
+        if: ${{ inputs.operation == 'deploy' }}
+        run: |
+          python3 -m venv /tmp/pm04-ansible
+          /tmp/pm04-ansible/bin/pip install \
+            ansible-core boto3 botocore
+          /tmp/pm04-ansible/bin/ansible-galaxy \
+            collection install -r ansible/requirements.yml
+
+      - name: Instalar Session Manager Plugin
+        if: ${{ inputs.operation == 'deploy' }}
+        run: |
+          curl -fsSL \
+            https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb \
+            -o /tmp/session-manager-plugin.deb
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Aguardar conexao SSM das duas VMs
+        if: ${{ inputs.operation == 'deploy' }}
+        run: |
+          for target in \
+            "$(terraform -chdir=terraform output -raw app_instance_id)" \
+            "$(terraform -chdir=terraform output -raw db_instance_id)"
+          do
+            conectado=false
+
+            for tentativa in $(seq 1 30); do
+              status=$(aws ssm get-connection-status \
+                --target "$target" \
+                --query Status --output text 2>/dev/null || true)
+
+              if [ "${status,,}" = "connected" ]; then
+                conectado=true
+                break
+              fi
+
+              sleep 10
+            done
+
+            if [ "$conectado" != "true" ]; then
+              echo "SSM indisponivel para $target"
+              exit 1
+            fi
+
+            echo "SSM conectado: $target"
+          done
+
+      - name: Gerar inventario e parametros Ansible
+        if: ${{ inputs.operation == 'deploy' }}
+        env:
+          UPDATE_OS: ${{ inputs.update_os }}
+          EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+          APP_VERSION: ${{ inputs.app_version }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          outputs = json.loads(subprocess.check_output(
+              ["terraform", "-chdir=terraform", "output", "-json"],
+              text=True
+          ))
+
+          def valor(nome):
+              return outputs[nome]["value"]
+
+          inventory = {
+              "all": {
+                  "vars": {
+                      "ansible_connection": "amazon.aws.aws_ssm",
+                      "ansible_aws_ssm_bucket_name":
+                          "pm04-kubeshop-ansible-251783195076",
+                      "ansible_aws_ssm_region": "us-east-1",
+                      "ansible_aws_ssm_timeout": 120,
+                      "ansible_python_interpreter": "/usr/bin/python3",
+                      "kubeshop_db_private_ip": valor("db_private_ip"),
+                      "kubeshop_ebs_volume_id": valor("mongo_volume_id")
+                  },
+                  "children": {
+                      "application": {
+                          "hosts": {
+                              "app-vm": {
+                                  "ansible_aws_ssm_instance_id":
+                                      valor("app_instance_id")
+                              }
+                          }
+                      },
+                      "database": {
+                          "hosts": {
+                              "database-vm": {
+                                  "ansible_aws_ssm_instance_id":
+                                      valor("db_instance_id")
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          os.makedirs("ansible/inventory", exist_ok=True)
+          with open("ansible/inventory/hosts.yml", "w") as arquivo:
+              json.dump(inventory, arquivo)
+
+          versao = os.environ["APP_VERSION"]
+          if not re.fullmatch(r"[A-Za-z0-9._-]+", versao):
+              raise ValueError("Versao da aplicacao invalida")
+
+          pacotes = [
+              p.strip() for p in
+              os.environ.get("EXTRA_PACKAGES", "").split(",")
+              if p.strip()
+          ]
+
+          if any(not re.fullmatch(r"[A-Za-z0-9.+_-]+", p)
+                 for p in pacotes):
+              raise ValueError("Nome de pacote invalido")
+
+          parametros = {
+              "update_os": os.environ.get("UPDATE_OS") == "true",
+              "extra_packages": pacotes,
+              "kubeshop_app_version": versao
+          }
+
+          with open("ansible/extra-vars.json", "w") as arquivo:
+              json.dump(parametros, arquivo)
+          PY
+
+      - name: Configurar servidores com Ansible
+        if: ${{ inputs.operation == 'deploy' }}
+        working-directory: ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ansible.cfg
+          KUBESHOP_MONGO_APP_PASSWORD: ${{ secrets.KUBESHOP_MONGO_APP_PASSWORD }}
+          KUBESHOP_MONGO_ROOT_PASSWORD: ${{ secrets.KUBESHOP_MONGO_ROOT_PASSWORD }}
+        run: |
+          test -n "$KUBESHOP_MONGO_APP_PASSWORD"
+          test -n "$KUBESHOP_MONGO_ROOT_PASSWORD"
+
+          /tmp/pm04-ansible/bin/ansible-playbook \
+            -i inventory/hosts.yml \
+            playbook.yml \
+            --extra-vars "@extra-vars.json"

@@ -24,3 +24,7 @@ crash.*.log
 
 # Inventario real das maquinas
 ansible/inventory/hosts.yml
+
+# Arquivos gerados pela pipeline
+ansible/extra-vars.json
+ansible/inventory/hosts.yml
