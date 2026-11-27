@@ -38,3 +38,10 @@ variable "mongo_volume_size" {
   }
 }
 
+variable "release_label" {
+  description = "Identificacao da atualizacao da VM"
+  type        = string
+  default     = "inicial"
+}
+
+
