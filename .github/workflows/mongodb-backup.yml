@@ -1,0 +1,151 @@
+name: Backup e restauracao MongoDB AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Acao a executar
+        type: choice
+        required: true
+        default: backup
+        options:
+          - backup
+          - restore-test
+      backup_key:
+        description: Chave S3 do arquivo .archive.gz (somente restore-test)
+        type: string
+        required: false
+        default: ''
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-pm04-dev
+  cancel-in-progress: false
+
+jobs:
+  mongodb:
+    name: Backup ou restauracao isolada MongoDB
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      OPERATION: ${{ github.event_name == 'schedule' && 'backup' || inputs.operation }}
+      BACKUP_KEY: ${{ inputs.backup_key }}
+
+    steps:
+      - name: Validar parametros
+        run: |
+          if [[ "$OPERATION" != 'backup' && "$OPERATION" != 'restore-test' ]]; then
+            echo 'Operacao invalida'
+            exit 1
+          fi
+          if [[ "$OPERATION" == 'restore-test' && ! "$BACKUP_KEY" =~ ^kubeshop/mongodb/kubeshop_[0-9]{8}T[0-9]{6}Z_[0-9]+[.]archive[.]gz$ ]]; then
+            echo 'Informe a chave completa de um arquivo .archive.gz existente no S3'
+            exit 1
+          fi
+
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Autenticar na AWS com OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.1
+        with:
+          role-to-assume: arn:aws:iam::251783195076:role/PM04GitHubActionsDeploy
+          aws-region: us-east-1
+
+      - name: Encontrar EC2 privada do MongoDB
+        run: |
+          ids=$(aws ec2 describe-instances \
+            --filters \
+              'Name=tag:Name,Values=pm04-kubeshop-db-dev' \
+              'Name=instance-state-name,Values=running' \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+          if [[ -z "$ids" || "$ids" == 'None' ]]; then
+            if [[ "$GITHUB_EVENT_NAME" == 'schedule' ]]; then
+              echo 'VM de banco parada: backup agendado ignorado.'
+              echo 'DB_AVAILABLE=false' >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo 'VM do MongoDB nao esta em execucao.'
+            exit 1
+          fi
+          read -r -a lista <<< "$ids"
+          if [[ ${#lista[@]} -ne 1 ]]; then
+            echo "Esperada exatamente uma EC2 de banco: $ids"
+            exit 1
+          fi
+          echo "DB_ID=${lista[0]}" >> "$GITHUB_ENV"
+          echo 'DB_AVAILABLE=true' >> "$GITHUB_ENV"
+
+      - name: Verificar conexao SSM
+        if: ${{ env.DB_AVAILABLE == 'true' }}
+        run: |
+          for tentativa in $(seq 1 12); do
+            status=$(aws ssm get-connection-status \
+              --target "$DB_ID" --query Status --output text 2>/dev/null || true)
+            if [[ "$status" == 'connected' || "$status" == 'Connected' ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'EC2 do MongoDB sem conexao SSM.'
+          exit 1
+
+      - name: Instalar Ansible e colecoes
+        if: ${{ env.DB_AVAILABLE == 'true' }}
+        run: |
+          python3 -m venv /tmp/pm04-ansible
+          /tmp/pm04-ansible/bin/pip install ansible-core boto3 botocore
+          /tmp/pm04-ansible/bin/ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Instalar Session Manager Plugin
+        if: ${{ env.DB_AVAILABLE == 'true' }}
+        run: |
+          curl -fsSL \
+            https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb \
+            -o /tmp/session-manager-plugin.deb
+          sudo dpkg -i /tmp/session-manager-plugin.deb
+
+      - name: Gerar inventario Ansible SSM
+        if: ${{ env.DB_AVAILABLE == 'true' }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          inventory = {
+              'all': {
+                  'vars': {
+                      'ansible_connection': 'amazon.aws.aws_ssm',
+                      'ansible_aws_ssm_region': 'us-east-1',
+                      'ansible_aws_ssm_bucket_name': 'pm04-kubeshop-ansible-251783195076',
+                      'ansible_python_interpreter': '/usr/bin/python3'
+                  },
+                  'children': {
+                      'database': {
+                          'hosts': {
+                              'database-vm': {
+                                  'ansible_aws_ssm_instance_id': os.environ['DB_ID']
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          with open('ansible/inventory/hosts.yml', 'w') as file:
+              json.dump(inventory, file)
+          PY
+
+      - name: Executar backup ou teste de restauracao
+        if: ${{ env.DB_AVAILABLE == 'true' }}
+        working-directory: ansible
+        env:
+          ANSIBLE_CONFIG: ${{ github.workspace }}/ansible/ansible.cfg
+          PM04_BACKUP_OPERATION: ${{ env.OPERATION }}
+          PM04_BACKUP_KEY: ${{ env.BACKUP_KEY }}
+        run: |
+          /tmp/pm04-ansible/bin/ansible-playbook \
+            -i inventory/hosts.yml backup-operations.yml
