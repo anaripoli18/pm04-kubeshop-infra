@@ -1,0 +1,126 @@
+---
+- name: Backup e teste de restauracao MongoDB na AWS
+  hosts: database
+  become: true
+  gather_facts: false
+  vars:
+    backup_bucket: pm04-kubeshop-backups-251783195076
+    backup_operation: "{{ lookup('ansible.builtin.env', 'PM04_BACKUP_OPERATION') }}"
+    backup_key: "{{ lookup('ansible.builtin.env', 'PM04_BACKUP_KEY') }}"
+
+  tasks:
+    - name: Validar operacao e chave S3
+      ansible.builtin.assert:
+        that:
+          - backup_operation in ['backup', 'restore-test']
+          - >-
+            backup_operation != 'restore-test' or
+            (backup_key is match('^kubeshop/mongodb/kubeshop_[0-9]{8}T[0-9]{6}Z_[0-9]+[.]archive[.]gz$'))
+        fail_msg: "Operacao ou chave S3 invalida."
+
+    - name: Atualizar scripts do repositorio na VM
+      ansible.builtin.git:
+        repo: https://github.com/anaripoli18/pm04-kubeshop-infra.git
+        dest: /opt/kubeshop
+        version: main
+        update: true
+
+    - name: Verificar instalacao da AWS CLI
+      ansible.builtin.command: aws --version
+      register: aws_cli_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Instalar unzip quando necessario
+      ansible.builtin.apt:
+        name: unzip
+        state: present
+        update_cache: true
+      when: aws_cli_ver.rc != 0
+
+    - name: Baixar instalador oficial da AWS CLI v2
+      ansible.builtin.get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/pm04-awscliv2.zip
+        mode: '0600'
+      when: aws_cli_ver.rc != 0
+
+    - name: Extrair AWS CLI v2
+      ansible.builtin.unarchive:
+        src: /tmp/pm04-awscliv2.zip
+        dest: /tmp
+        remote_src: true
+        creates: /tmp/aws/install
+      when: aws_cli_ver.rc != 0
+
+    - name: Instalar AWS CLI v2
+      ansible.builtin.command:
+        cmd: /tmp/aws/install
+        creates: /usr/local/bin/aws
+      when: aws_cli_ver.rc != 0
+
+    - name: Conferir AWS CLI
+      ansible.builtin.command: aws --version
+      changed_when: false
+
+    - name: Confirmar acesso ao bucket de backups pela IAM role da EC2
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3api
+          - head-bucket
+          - --bucket
+          - "{{ backup_bucket }}"
+      changed_when: false
+
+    - name: Exportar MongoDB e enviar arquivo e manifesto ao S3
+      ansible.builtin.command:
+        argv:
+          - bash
+          - scripts/backup/backup-mongodb.sh
+        chdir: /opt/kubeshop
+      environment:
+        BACKUP_MODE: s3
+        S3_BUCKET: "{{ backup_bucket }}"
+        AWS_REGION: us-east-1
+      register: backup_result
+      when: backup_operation == 'backup'
+
+    - name: Validar backup enviado
+      ansible.builtin.assert:
+        that:
+          - "'BACKUP=APROVADO' in backup_result.stdout"
+        fail_msg: 'Backup nao confirmou o envio ao S3.'
+      when: backup_operation == 'backup'
+
+    - name: Mostrar evidencias do backup
+      ansible.builtin.debug:
+        var: backup_result.stdout_lines
+      when: backup_operation == 'backup'
+
+    - name: Restaurar backup do S3 em banco temporario
+      ansible.builtin.command:
+        argv:
+          - bash
+          - scripts/backup/restore-mongodb.sh
+          - "{{ backup_key }}"
+        chdir: /opt/kubeshop
+      environment:
+        BACKUP_MODE: s3
+        S3_BUCKET: "{{ backup_bucket }}"
+        AWS_REGION: us-east-1
+      register: restore_result
+      when: backup_operation == 'restore-test'
+
+    - name: Validar restauracao e integridade
+      ansible.builtin.assert:
+        that:
+          - "'RESULTADO=APROVADO' in restore_result.stdout"
+          - "'SHA-256=APROVADO' in restore_result.stdout"
+        fail_msg: 'Restauracao ou integridade nao validada.'
+      when: backup_operation == 'restore-test'
+
+    - name: Mostrar evidencias da restauracao
+      ansible.builtin.debug:
+        var: restore_result.stdout_lines
+      when: backup_operation == 'restore-test'
